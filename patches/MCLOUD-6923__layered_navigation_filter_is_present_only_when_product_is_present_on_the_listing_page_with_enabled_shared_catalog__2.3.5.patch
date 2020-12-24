@@ -1,0 +1,177 @@
+diff -Nuar a/vendor/magento/module-shared-catalog/Model/SearchAdapter/Aggregation/Builder/DataProvider.php b/vendor/magento/module-shared-catalog/Model/SearchAdapter/Aggregation/Builder/DataProvider.php
+--- a/vendor/magento/module-shared-catalog/Model/SearchAdapter/Aggregation/Builder/DataProvider.php
++++ b/vendor/magento/module-shared-catalog/Model/SearchAdapter/Aggregation/Builder/DataProvider.php
+@@ -103,18 +103,16 @@ public function __construct(
+      *
+      * @param BucketInterface $bucket
+      * @param array $dimensions
+-     * @param array $documentIds
+      * @return array
+      * @throws \Magento\Framework\Exception\LocalizedException
+      * @throws \Zend_Db_Statement_Exception
+      */
+     public function getAggregation(
+         BucketInterface $bucket,
+-        array $dimensions,
+-        array $documentIds
++        array $dimensions
+     ) {
+         $result = [];
+-        $select = $this->getSelect($bucket, $dimensions, $documentIds);
++        $select = $this->getSelect($bucket, $dimensions);
+         $query  = $this->connection->query($select);
+ 
+         while ($row = $query->fetch()) {
+@@ -134,11 +132,10 @@ public function getAggregation(
+      *
+      * @param BucketInterface $bucket
+      * @param array $dimensions
+-     * @param array $documentIds
+      * @return Select
+      * @throws \Magento\Framework\Exception\LocalizedException
+      */
+-    private function getSelect(BucketInterface $bucket, array $dimensions, array $documentIds)
++    private function getSelect(BucketInterface $bucket, array $dimensions)
+     {
+         $attribute = $this->eavConfig->getAttribute(Product::ENTITY, $bucket->getField());
+         $currentScope = $this->scopeResolver->getScope($dimensions['scope']->getValue());
+@@ -161,7 +158,6 @@ private function getSelect(BucketInterface $bucket, array $dimensions, array $do
+             'source_entity.sku  = shared_catalog_item.sku',
+             []
+         )
+-        ->where('eav.entity_id IN (?)', $documentIds)
+         ->where('eav.attribute_id = ?', $attribute->getId())
+         ->where('eav.store_id = ? ', $currentScope->getId())
+         ->where('source_entity.type_id <> ?', 'configurable')
+diff -Nuar a/vendor/magento/module-shared-catalog/Plugin/Elasticsearch/SearchAdapter/Aggregation/Builder/UpdateTermBucketBuilderPlugin.php b/vendor/magento/module-shared-catalog/Plugin/Elasticsearch/SearchAdapter/Aggregation/Builder/UpdateTermBucketBuilderPlugin.php
+--- a/vendor/magento/module-shared-catalog/Plugin/Elasticsearch/SearchAdapter/Aggregation/Builder/UpdateTermBucketBuilderPlugin.php
++++ b/vendor/magento/module-shared-catalog/Plugin/Elasticsearch/SearchAdapter/Aggregation/Builder/UpdateTermBucketBuilderPlugin.php
+@@ -65,8 +65,7 @@ public function afterBuild(
+         $shouldAggregate = ($bucket->getField() !== 'category_ids');
+ 
+         if ($sharedCatalogIsEnabled && $shouldAggregate) {
+-            $documentIds = array_column($queryResult['hits']['hits'], '_id');
+-            $values = $this->dataProvider->getAggregation($bucket, $dimensions, $documentIds);
++            $values = $this->dataProvider->getAggregation($bucket, $dimensions);
+         }
+ 
+         return $values;
+diff -Nuar a/vendor/magento/module-shared-catalog/Test/Unit/Plugin/Elasticsearch/SearchAdapter/Aggregation/Builder/UpdateTermBucketBuilderPluginTest.php b/vendor/magento/module-shared-catalog/Test/Unit/Plugin/Elasticsearch/SearchAdapter/Aggregation/Builder/UpdateTermBucketBuilderPluginTest.php
+new file mode 100644
+--- /dev/null
++++ b/vendor/magento/module-shared-catalog/Test/Unit/Plugin/Elasticsearch/SearchAdapter/Aggregation/Builder/UpdateTermBucketBuilderPluginTest.php
+@@ -0,0 +1,114 @@
++<?php
++/**
++ * Copyright © Magento, Inc. All rights reserved.
++ * See COPYING.txt for license details.
++ */
++declare(strict_types=1);
++
++namespace Magento\SharedCatalog\Test\Unit\Plugin\Elasticsearch\SearchAdapter\Aggregation\Builder;
++
++use Magento\Elasticsearch\SearchAdapter\Aggregation\Builder\Term;
++use Magento\Framework\Search\Request\BucketInterface as RequestBucketInterface;
++use Magento\Framework\TestFramework\Unit\Helper\ObjectManager;
++use Magento\SharedCatalog\Api\StatusInfoInterface;
++use Magento\SharedCatalog\Model\SearchAdapter\Aggregation\Builder\DataProvider as BuilderDataProvider;
++use Magento\SharedCatalog\Plugin\Elasticsearch\SearchAdapter\Aggregation\Builder\UpdateTermBucketBuilderPlugin;
++use Magento\Store\Model\ScopeInterface;
++use PHPUnit\Framework\MockObject\MockObject;
++use PHPUnit\Framework\TestCase;
++
++/**
++ * Unit test for UpdateTermBucketBuilderPlugin
++ */
++class UpdateTermBucketBuilderPluginTest extends TestCase
++{
++    /**
++     * @var StatusInfoInterface|MockObject
++     */
++    private $statusInfo;
++
++    /**
++     * @var BuilderDataProvider|MockObject
++     */
++    private $dataProvider;
++
++    /**
++     * @var UpdateTermBucketBuilderPlugin|MockObject
++     */
++    private $bucketBuilderPlugin;
++
++    /**
++     * @inheritDoc
++     */
++    protected function setUp(): void
++    {
++        $this->statusInfo = $this->getMockBuilder(StatusInfoInterface::class)
++            ->disableOriginalConstructor()
++            ->getMock();
++
++        $this->dataProvider = $this->getMockBuilder(BuilderDataProvider::class)
++            ->disableOriginalConstructor()
++            ->getMock();
++
++        $objectManager = new ObjectManager($this);
++        $this->bucketBuilderPlugin = $objectManager->getObject(
++            UpdateTermBucketBuilderPlugin::class,
++            [
++                'statusInfo' => $this->statusInfo,
++                'dataProvider' => $this->dataProvider
++            ]
++        );
++    }
++
++    /**
++     * Test for afterBuild() method
++     *
++     * @param string $bucketFieldName
++     * @param bool $shouldAggregate
++     * @param array $expectedValues
++     * @return void
++     * @dataProvider afterBuildDataProvider
++     */
++    public function testAfterBuild(string $bucketFieldName, bool $shouldAggregate, array $expectedValues): void
++    {
++        $dimensions = [];
++        $values = [1, 2];
++        $subject = $this->getMockBuilder(Term::class)
++            ->disableOriginalConstructor()
++            ->getMock();
++
++        $bucket = $this->getMockBuilder(RequestBucketInterface::class)
++            ->disableOriginalConstructor()
++            ->getMock();
++        $bucket->method('getField')
++            ->willReturn($bucketFieldName);
++
++        $this->statusInfo->method('isActive')
++            ->with(ScopeInterface::SCOPE_STORE)
++            ->willReturn(true);
++
++        if ($shouldAggregate) {
++            $this->dataProvider->expects($this->once())
++                ->method('getAggregation')
++                ->with($bucket, $dimensions)
++                ->willReturn($expectedValues);
++        }
++
++        $result = $this->bucketBuilderPlugin->afterBuild($subject, $values, $bucket, $dimensions, []);
++
++        $this->assertEquals($expectedValues, $result);
++    }
++
++    /**
++     * Data provider for afterBuild() test
++     *
++     * @return array
++     */
++    public function afterBuildDataProvider(): array
++    {
++        return [
++            ['category_ids', false, [1, 2]],
++            ['test_attribute', true, [1, 2, 3]]
++        ];
++    }
++}
